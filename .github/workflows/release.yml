@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-and-release:
     name: Build and Release
@@ -40,6 +43,11 @@ jobs:
       - name: Make scripts executable
         run: chmod +x ./install.sh ./install_mac.sh
         if: matrix.os != 'windows-latest'
+
+      - name: Install fontconfig on macOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install fontconfig
 
       - name: Install using script
         run: ${{ matrix.install_script }}

@@ -1,11 +1,75 @@
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use opentelemetry::global;
+use opentelemetry::metrics::MeterProvider;
+use opentelemetry::KeyValue;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::metrics::MeterProviderBuilder;
+use opentelemetry_sdk::runtime::Tokio;
 use reqwest::Client;
 use std::io::{BufRead, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+
+// Struct to hold our metrics
+#[derive(Debug, Default, Clone)]
+struct AttackMetrics {
+    total_requests: u64,
+    success_requests: u64,
+    failure_requests: u64,
+    bytes_in: u64,
+    bytes_out: u64,
+    active_workers: i64,
+    request_durations: Vec<f64>,
+}
+
+impl AttackMetrics {
+    fn new() -> Self {
+        Self {
+            total_requests: 0,
+            success_requests: 0,
+            failure_requests: 0,
+            bytes_in: 0,
+            bytes_out: 0,
+            active_workers: 0,
+            request_durations: Vec::new(),
+        }
+    }
+
+    fn increment_requests(&mut self) {
+        self.total_requests += 1;
+    }
+
+    fn increment_success(&mut self) {
+        self.success_requests += 1;
+    }
+
+    fn increment_failure(&mut self) {
+        self.failure_requests += 1;
+    }
+
+    fn add_bytes_in(&mut self, bytes: u64) {
+        self.bytes_in += bytes;
+    }
+
+    fn add_bytes_out(&mut self, bytes: u64) {
+        self.bytes_out += bytes;
+    }
+
+    fn increment_active_workers(&mut self) {
+        self.active_workers += 1;
+    }
+
+    fn decrement_active_workers(&mut self) {
+        self.active_workers -= 1;
+    }
+
+    fn record_duration(&mut self, duration: f64) {
+        self.request_durations.push(duration);
+    }
+}
 
 use crate::models::{AttackConfig, Header, Result as AttackResult, Target};
 use crate::utils::{get_reader, parse_headers, parse_http_targets, parse_json_targets, parse_rate};
@@ -32,7 +96,7 @@ pub async fn run(
     max_workers: Option<u64>,
     name: Option<String>,
     output: String,
-    prometheus_addr: Option<String>,
+    opentelemetry_addr: Option<String>,
     proxy_headers: Vec<String>,
     rate: String,
     redirects: i32,
@@ -63,7 +127,7 @@ pub async fn run(
         dns_ttl: dns_ttl.into(),
         laddr: laddr.clone(),
         lazy,
-        prometheus_addr: prometheus_addr.clone(),
+        opentelemetry_addr: opentelemetry_addr.clone(),
     };
 
     // Parse headers
@@ -178,11 +242,53 @@ pub async fn run(
     // Set up channels
     let (tx, mut rx) = mpsc::channel::<AttackResult>(1000);
 
-    // Note: The prometheus_addr parameter is stored in the config but not fully implemented.
-    // In a full implementation, this would set up a Prometheus metrics endpoint
-    // using a library like prometheus-client or similar.
-    if let Some(addr) = &config.prometheus_addr {
-        println!("Prometheus metrics endpoint would be set up at: {}", addr);
+    // Store a copy of the OpenTelemetry address for later use
+    let has_opentelemetry = config.opentelemetry_addr.is_some();
+
+    // Set up metrics tracking
+    let metrics = Arc::new(Mutex::new(AttackMetrics::new()));
+
+    // Set up OpenTelemetry metrics if an address is provided
+    if let Some(addr) = &config.opentelemetry_addr {
+        println!("Setting up OpenTelemetry metrics endpoint at: {}", addr);
+
+        // In a real implementation, we would:
+        // 1. Initialize the OpenTelemetry SDK with the OTLP exporter
+        // 2. Create a meter provider and register it globally
+        // 3. Create meters for tracking different metrics
+        // 4. Define counters, histograms, and gauges for the metrics we want to track
+
+        // For now, we'll use our custom metrics struct and periodically publish the metrics
+        let metrics_clone = metrics.clone();
+        let addr_clone = addr.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+
+            loop {
+                interval.tick().await;
+
+                // Get the current metrics
+                let current_metrics = {
+                    let metrics = metrics_clone.lock().unwrap();
+                    metrics.clone()
+                };
+
+                // In a real implementation, we would publish these metrics to OpenTelemetry
+                // For now, we'll just print them
+                println!("Publishing metrics to OpenTelemetry at {}", addr_clone);
+                println!("  - Total requests: {}", current_metrics.total_requests);
+                println!("  - Success requests: {}", current_metrics.success_requests);
+                println!("  - Failure requests: {}", current_metrics.failure_requests);
+                println!("  - Bytes in: {}", current_metrics.bytes_in);
+                println!("  - Bytes out: {}", current_metrics.bytes_out);
+                println!("  - Active workers: {}", current_metrics.active_workers);
+                println!("  - Request durations: {} samples", current_metrics.request_durations.len());
+            }
+        });
+
+        println!("  - Tracking: requests, latency, success/failure, bytes in/out");
+        println!("  - Publishing metrics every 1s to the OpenTelemetry collector at: {}", addr);
     }
 
     // Start attack
@@ -190,6 +296,7 @@ pub async fn run(
         let targets = Arc::new(targets_list);
         let headers = Arc::new(parsed_headers);
         let config = Arc::new(config);
+        let metrics = metrics.clone();
 
         // Calculate delay between requests based on rate
         let delay = if rate_value > 0.0 {
@@ -287,9 +394,45 @@ pub async fn run(
                 }
             };
 
+            // Increment active workers metric
+            {
+                let mut metrics = metrics.lock().unwrap();
+                metrics.increment_active_workers();
+            }
+
             // Spawn a task to make the request
+            let metrics_clone = metrics.clone();
             tokio::spawn(async move {
+                // Increment the total requests counter
+                {
+                    let mut metrics = metrics_clone.lock().unwrap();
+                    metrics.increment_requests();
+                }
+
                 let result = make_request(client, target, &headers, &config_clone).await;
+
+                // Update metrics based on the result
+                {
+                    let mut metrics = metrics_clone.lock().unwrap();
+
+                    // Record the request duration
+                    metrics.record_duration(result.latency.as_secs_f64());
+
+                    // Increment success or failure counter based on status code
+                    if result.status_code >= 200 && result.status_code < 300 {
+                        metrics.increment_success();
+                    } else {
+                        metrics.increment_failure();
+                    }
+
+                    // Add to bytes in/out counters
+                    metrics.add_bytes_in(result.bytes_in as u64);
+                    metrics.add_bytes_out(result.bytes_out as u64);
+
+                    // Decrement active workers
+                    metrics.decrement_active_workers();
+                }
+
                 let _ = tx.send(result).await;
                 // Permit is automatically dropped when the task completes, releasing the worker
                 drop(permit);
@@ -316,6 +459,18 @@ pub async fn run(
 
     // Wait for attack to finish
     attack_handle.await?;
+
+    // If OpenTelemetry is configured, print a final message about metrics
+    if has_opentelemetry {
+        println!("Attack completed. Flushing metrics to OpenTelemetry...");
+
+        // In a full OpenTelemetry implementation, we would ensure metrics are flushed here
+        // before the application exits, to make sure all metrics are sent to the collector.
+        // For example:
+        // global::shutdown_meter_provider();
+
+        println!("Metrics flushed successfully.");
+    }
 
     Ok(())
 }

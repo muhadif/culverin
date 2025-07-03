@@ -22,6 +22,9 @@ chrono = { version = "0.4", features = ["serde"] }
 indicatif = "0.17"
 anyhow = "1.0"
 thiserror = "1.0"
+opentelemetry = { version = "0.20", features = ["metrics"] }
+opentelemetry-otlp = { version = "0.13", features = ["metrics", "http-proto"] }
+opentelemetry_sdk = { version = "0.20", features = ["metrics", "rt-tokio"] }
 plotters = "0.3"
 humantime = "2.1"
 num_cpus = "1.16"

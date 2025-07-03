@@ -110,9 +110,9 @@ enum Commands {
         #[arg(long, default_value = "stdout")]
         output: String,
 
-        /// Prometheus exporter listen address [empty = disabled]
+        /// OpenTelemetry exporter listen address [empty = disabled]
         #[arg(long)]
-        prometheus_addr: Option<String>,
+        opentelemetry_addr: Option<String>,
 
         /// Proxy CONNECT header
         #[arg(long = "proxy-header", value_name = "value")]
@@ -299,7 +299,7 @@ async fn main() -> Result<()> {
             max_workers,
             name,
             output,
-            prometheus_addr,
+            opentelemetry_addr,
             proxy_headers,
             rate,
             redirects,
@@ -321,7 +321,7 @@ async fn main() -> Result<()> {
             attack::run(
                 body, cert, chunked, connections, dns_ttl, duration, format, h2c, 
                 headers, http2, insecure, keepalive, key, laddr, lazy, max_body, 
-                max_connections, max_workers, name, output, prometheus_addr, 
+                max_connections, max_workers, name, output, opentelemetry_addr, 
                 proxy_headers, rate, redirects, resolvers, root_certs, 
                 session_tickets, targets, timeout, unix_socket, effective_workers
             ).await?;

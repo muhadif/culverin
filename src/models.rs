@@ -107,6 +107,6 @@ pub struct AttackConfig {
     pub laddr: String,
     /// Read targets lazily
     pub lazy: bool,
-    /// Prometheus exporter listen address
-    pub prometheus_addr: Option<String>,
+    /// OpenTelemetry exporter listen address
+    pub opentelemetry_addr: Option<String>,
 }

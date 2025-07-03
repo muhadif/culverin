@@ -157,8 +157,8 @@ Flags:
         Attack name
   --output string
         Output file (default "stdout")
-  --prometheus-addr string
-        Prometheus exporter listen address [empty = disabled]
+  --opentelemetry-addr string
+        OpenTelemetry exporter listen address [empty = disabled]
   --proxy-header value
         Proxy CONNECT header
   --rate value

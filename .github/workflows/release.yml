@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: culverin-linux
+            asset_name: culverin-linux
+            install_script: ./install.sh
+          - os: macos-latest
+            artifact_name: culverin-macos
+            asset_name: culverin-macos
+            install_script: ./install_mac.sh
+          - os: windows-latest
+            artifact_name: culverin-windows.exe
+            asset_name: culverin-windows
+            install_script: powershell -ExecutionPolicy Bypass -File ./install_windows.ps1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Install using script
+        run: ${{ matrix.install_script }}
+        shell: bash
+        if: matrix.os != 'windows-latest'
+
+      - name: Install using script (Windows)
+        run: ${{ matrix.install_script }}
+        if: matrix.os == 'windows-latest'
+
+      - name: Rename binary (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cp $HOME/.cargo/bin/culverin ${{ matrix.artifact_name }}
+
+      - name: Rename binary (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          copy "%USERPROFILE%\.cargo\bin\culverin.exe" ${{ matrix.artifact_name }}
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ matrix.artifact_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: build-and-release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Publish to crates.io
+        uses: actions-rs/cargo@v1
+        with:
+          command: publish
+          args: --token ${{ secrets.CRATES_IO_TOKEN }}

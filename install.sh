@@ -10,6 +10,13 @@ if ! command -v cargo &> /dev/null; then
     source $HOME/.cargo/env
 fi
 
+# Install system dependencies on Linux
+if [[ "$(uname)" == "Linux" ]]; then
+    echo "Installing system dependencies..."
+    sudo apt-get update
+    sudo apt-get install -y libfontconfig1-dev
+fi
+
 # Install culverin
 cargo install --path .
 

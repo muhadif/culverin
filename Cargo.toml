@@ -1,7 +1,7 @@
 [package]
 name = "culverin"
 version = "0.1.1"
-edition = "2024"
+edition = "2021"
 description = "A HTTP load testing tool"
 authors = ["Culverin Contributors"]
 license = "MIT"

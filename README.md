@@ -50,6 +50,8 @@ cd culverin
 .\install_windows.ps1
 ```
 
+> **Note for Windows users**: Visual Studio Build Tools with C++ support is required. The installation script will check for this and offer to download and install it if not found. Alternatively, you can install it manually from [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/). During installation, make sure to select the "Desktop development with C++" workload.
+
 ### Manual Installation (All Platforms)
 
 If you prefer to install manually or the installation scripts don't work for you:
@@ -65,6 +67,8 @@ cd culverin
 # Build and install
 cargo install --path .
 ```
+
+> **Note for Windows manual installation**: You'll still need Visual Studio Build Tools with C++ support installed. Make sure to install it from [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) and select the "Desktop development with C++" workload during installation.
 
 ## Usage
 

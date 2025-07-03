@@ -46,6 +46,11 @@ jobs:
         shell: bash
         if: matrix.os != 'windows-latest'
 
+      - name: Install Visual Studio Build Tools (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          choco install visualstudio2019buildtools -y --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+
       - name: Install using script (Windows)
         run: ${{ matrix.install_script }}
         if: matrix.os == 'windows-latest'

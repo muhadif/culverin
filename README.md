@@ -254,6 +254,124 @@ cat results.bin | culverin plot --output=results.html --title="API Performance T
 cat results.bin | culverin encode --to=csv --output=results.csv
 ```
 
+### Using OpenTelemetry for Metrics
+
+Culverin supports exporting metrics to an OpenTelemetry collector, which allows you to monitor your load tests in real-time using tools like Prometheus, Grafana, or any other system that can consume OpenTelemetry metrics.
+
+```bash
+echo "GET http://example.com/" | culverin attack \
+  --duration=30s \
+  --rate=50/1s \
+  --opentelemetry-addr="http://localhost:4318/v1/metrics"
+```
+
+The following metrics are exported:
+- `requests`: Total number of requests
+- `success_requests`: Number of successful requests
+- `failure_requests`: Number of failed requests
+- `bytes_in`: Total bytes received
+- `bytes_out`: Total bytes sent
+- `active_workers`: Number of active workers
+- `request_duration`: Histogram of request durations in seconds
+
+To use this feature, you need to have an OpenTelemetry collector running. You can set up a collector using the [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) project.
+
+## Using Culverin as a Library
+
+Culverin can also be used as a library in your Rust applications, allowing you to integrate load testing capabilities directly into your code.
+
+### Adding Culverin to Your Project
+
+Add Culverin to your `Cargo.toml`:
+
+```toml
+[dependencies]
+culverin = { git = "https://github.com/muhadif/culverin.git" }
+tokio = { version = "1.35", features = ["full"] }
+anyhow = "1.0"
+```
+
+### Basic Example
+
+Here's a simple example of using Culverin as a library:
+
+```rust
+use culverin::{AttackBuilder, get, calculate_metrics};
+use std::time::Duration;
+use anyhow::Result;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Create a target using the helper function
+    let target = get("https://example.com")?;
+
+    // Configure and run the attack
+    let results = AttackBuilder::new()
+        .rate(10.0)  // 10 requests per second
+        .duration(Duration::from_secs(5))  // Run for 5 seconds
+        .timeout(Duration::from_secs(3))   // 3 second timeout
+        .workers(4)                        // Use 4 worker threads
+        .add_header("User-Agent", "culverin-example")
+        .add_target(target)
+        .run()
+        .await?;
+
+    // Calculate and display metrics
+    if let Some(metrics) = calculate_metrics(&results) {
+        println!("Attack completed!");
+        println!("Total requests: {}", metrics.requests);
+        println!("Success rate: {:.2}%", metrics.success_rate * 100.0);
+        println!("Mean latency: {:.2}ms", metrics.mean.as_secs_f64() * 1000.0);
+        println!("95th percentile: {:.2}ms", metrics.p95.as_secs_f64() * 1000.0);
+        println!("Requests/second: {:.2}", metrics.rate);
+    }
+
+    Ok(())
+}
+```
+
+### Advanced Usage
+
+For more advanced usage, including custom targets with different HTTP methods, headers, and bodies, see the [advanced example](examples/advanced_attack.rs).
+
+### API Reference
+
+#### Main Types
+
+- `Target`: Represents a target for the load test (method, URL, headers, body)
+- `Header`: Represents an HTTP header (name, value)
+- `AttackResult`: Represents the result of a single request
+- `Metrics`: Represents metrics from a load test
+- `AttackBuilder`: Builder for configuring and running an attack
+
+#### Helper Functions
+
+- `get(url)`: Create a GET target
+- `post(url, body)`: Create a POST target with the specified body
+- `target(method, url)`: Create a target with the specified method
+- `calculate_metrics(results)`: Calculate metrics from attack results
+
+#### AttackBuilder Methods
+
+The `AttackBuilder` provides a fluent API for configuring load tests. Here are some of the key methods:
+
+- `rate(f64)`: Set the request rate (requests per second)
+- `duration(Duration)`: Set the attack duration
+- `timeout(Duration)`: Set the request timeout
+- `workers(u64)`: Set the number of workers
+- `max_workers(u64)`: Set the maximum number of workers
+- `keepalive(bool)`: Set whether to keep connections alive
+- `http2(bool)`: Set whether to use HTTP/2
+- `insecure(bool)`: Set whether to ignore invalid TLS certificates
+- `redirects(i32)`: Set the number of redirects to follow
+- `add_header(name, value)`: Add a header to all requests
+- `add_target(target)`: Add a target to the attack
+- `targets(targets)`: Set multiple targets for the attack
+- `opentelemetry_addr(String)`: Set the OpenTelemetry exporter address for metrics
+- `run()`: Run the attack and collect results
+
+For more details, see the [library documentation](src/lib.rs) and the [example files](examples/).
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

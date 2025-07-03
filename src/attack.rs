@@ -3,15 +3,19 @@ use indicatif::{ProgressBar, ProgressStyle};
 use opentelemetry::global;
 use opentelemetry::metrics::MeterProvider;
 use opentelemetry::KeyValue;
+use opentelemetry_appender_tracing::layer;
 use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::logs::LoggerProvider;
 use opentelemetry_sdk::metrics::MeterProviderBuilder;
-use opentelemetry_sdk::runtime::Tokio;
+use opentelemetry_sdk::Resource;
 use reqwest::Client;
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::{prelude::*, EnvFilter};
 
 // Struct to hold our metrics
 #[derive(Debug, Default, Clone)]
@@ -247,23 +251,121 @@ pub async fn run(
 
     // Set up metrics tracking
     let metrics = Arc::new(Mutex::new(AttackMetrics::new()));
+    let metrics_for_shutdown = metrics.clone();
 
-    // Set up OpenTelemetry metrics if an address is provided
+    // Set up OpenTelemetry metrics and logs if an address is provided
     if let Some(addr) = &config.opentelemetry_addr {
-        println!("Setting up OpenTelemetry metrics endpoint at: {}", addr);
+        println!("Setting up OpenTelemetry endpoint at: {}", addr);
 
-        // In a real implementation, we would:
-        // 1. Initialize the OpenTelemetry SDK with the OTLP exporter
-        // 2. Create a meter provider and register it globally
-        // 3. Create meters for tracking different metrics
-        // 4. Define counters, histograms, and gauges for the metrics we want to track
+        // Initialize the OpenTelemetry OTLP exporter for metrics
+        let metrics_exporter = opentelemetry_otlp::new_exporter()
+            .http()
+            .with_endpoint(format!("{}/v1/metrics", addr.clone()));
 
-        // For now, we'll use our custom metrics struct and periodically publish the metrics
+        // Create a meter provider
+        let meter_provider = MeterProviderBuilder::default()
+            .with_resource(Resource::new(vec![KeyValue::new("service.name", "culverin")]))
+            .build();
+
+        // Register the meter provider globally
+        global::set_meter_provider(meter_provider);
+
+        // Create a meter for tracking different metrics
+        let meter = global::meter_provider().meter("culverin");
+
+        // Define counters, histograms, and gauges for the metrics we want to track
+        let request_counter = meter
+            .u64_counter("requests")
+            .with_description("Total number of requests")
+            .init();
+
+        let success_counter = meter
+            .u64_counter("success_requests")
+            .with_description("Number of successful requests")
+            .init();
+
+        let failure_counter = meter
+            .u64_counter("failure_requests")
+            .with_description("Number of failed requests")
+            .init();
+
+        let bytes_in_counter = meter
+            .u64_counter("bytes_in")
+            .with_description("Total bytes received")
+            .init();
+
+        let bytes_out_counter = meter
+            .u64_counter("bytes_out")
+            .with_description("Total bytes sent")
+            .init();
+
+        let active_workers_gauge = meter
+            .i64_up_down_counter("active_workers")
+            .with_description("Number of active workers")
+            .init();
+
+        let request_duration_histogram = meter
+            .f64_histogram("request_duration")
+            .with_description("Request duration in seconds")
+            .init();
+
+        // Set up OpenTelemetry logging
+        println!("Setting up OpenTelemetry logging...");
+
+        // Create a stdout exporter for logs (for testing)
+        let logs_exporter = opentelemetry_stdout::LogExporter::default();
+
+        // Create a logger provider
+        let logger_provider = LoggerProvider::builder()
+            .with_simple_exporter(logs_exporter)
+            .build();
+
+        // Set up filtering to prevent telemetry-induced-telemetry loops
+        let filter_otel = EnvFilter::new("info")
+            .add_directive("hyper=off".parse().unwrap())
+            .add_directive("tonic=off".parse().unwrap())
+            .add_directive("h2=off".parse().unwrap())
+            .add_directive("reqwest=off".parse().unwrap());
+
+        // Create the OpenTelemetry tracing bridge with filtering
+        let otel_layer = layer::OpenTelemetryTracingBridge::new(&logger_provider)
+            .with_filter(filter_otel);
+
+        // Create a standard formatting layer with its own filter
+        let filter_fmt = EnvFilter::new("info")
+            .add_directive("opentelemetry=debug".parse().unwrap());
+
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_thread_names(true)
+            .with_filter(filter_fmt);
+
+        // Initialize the tracing subscriber with both layers
+        tracing_subscriber::registry()
+            .with(otel_layer)
+            .with(fmt_layer)
+            .init();
+
+        info!(
+            service_name = "culverin",
+            event = "attack_started",
+            message = "Starting load test attack",
+            rate = rate_value,
+            workers = workers,
+            targets_count = targets_list.len(),
+        );
+
+        // Clone metrics for the telemetry task
         let metrics_clone = metrics.clone();
         let addr_clone = addr.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut last_total = 0;
+            let mut last_success = 0;
+            let mut last_failure = 0;
+            let mut last_bytes_in = 0;
+            let mut last_bytes_out = 0;
+            let mut last_durations_count = 0;
 
             loop {
                 interval.tick().await;
@@ -274,21 +376,68 @@ pub async fn run(
                     metrics.clone()
                 };
 
-                // In a real implementation, we would publish these metrics to OpenTelemetry
-                // For now, we'll just print them
-                println!("Publishing metrics to OpenTelemetry at {}", addr_clone);
-                println!("  - Total requests: {}", current_metrics.total_requests);
-                println!("  - Success requests: {}", current_metrics.success_requests);
-                println!("  - Failure requests: {}", current_metrics.failure_requests);
-                println!("  - Bytes in: {}", current_metrics.bytes_in);
-                println!("  - Bytes out: {}", current_metrics.bytes_out);
-                println!("  - Active workers: {}", current_metrics.active_workers);
-                println!("  - Request durations: {} samples", current_metrics.request_durations.len());
+                // Publish metrics to OpenTelemetry
+                let attributes = [KeyValue::new("service", "culverin")];
+
+                // Update counters with the delta values
+                let total_delta = current_metrics.total_requests - last_total;
+                let success_delta = current_metrics.success_requests - last_success;
+                let failure_delta = current_metrics.failure_requests - last_failure;
+                let bytes_in_delta = current_metrics.bytes_in - last_bytes_in;
+                let bytes_out_delta = current_metrics.bytes_out - last_bytes_out;
+
+                if total_delta > 0 {
+                    request_counter.add(total_delta, &attributes);
+                }
+                if success_delta > 0 {
+                    success_counter.add(success_delta, &attributes);
+                }
+                if failure_delta > 0 {
+                    failure_counter.add(failure_delta, &attributes);
+                }
+                if bytes_in_delta > 0 {
+                    bytes_in_counter.add(bytes_in_delta, &attributes);
+                }
+                if bytes_out_delta > 0 {
+                    bytes_out_counter.add(bytes_out_delta, &attributes);
+                }
+
+                // Update gauge with current value
+                active_workers_gauge.add(current_metrics.active_workers, &attributes);
+
+                // Record new durations in the histogram
+                if current_metrics.request_durations.len() > last_durations_count {
+                    for i in last_durations_count..current_metrics.request_durations.len() {
+                        request_duration_histogram.record(
+                            current_metrics.request_durations[i], 
+                            &attributes
+                        );
+                    }
+                }
+
+                // Update last values
+                last_total = current_metrics.total_requests;
+                last_success = current_metrics.success_requests;
+                last_failure = current_metrics.failure_requests;
+                last_bytes_in = current_metrics.bytes_in;
+                last_bytes_out = current_metrics.bytes_out;
+                last_durations_count = current_metrics.request_durations.len();
+
+                debug!(
+                    event = "metrics_published",
+                    total_requests = last_total,
+                    success_requests = last_success,
+                    failure_requests = last_failure,
+                    bytes_in = last_bytes_in,
+                    bytes_out = last_bytes_out,
+                    active_workers = current_metrics.active_workers,
+                    message = format!("Published metrics to OpenTelemetry at {}", addr_clone)
+                );
             }
         });
 
         println!("  - Tracking: requests, latency, success/failure, bytes in/out");
-        println!("  - Publishing metrics every 1s to the OpenTelemetry collector at: {}", addr);
+        println!("  - Publishing metrics and logs to the OpenTelemetry collector at: {}", addr);
     }
 
     // Start attack
@@ -409,7 +558,48 @@ pub async fn run(
                     metrics.increment_requests();
                 }
 
+                debug!(
+                    event = "request_start",
+                    method = target.method,
+                    url = target.url.to_string(),
+                    message = "Starting request"
+                );
+
                 let result = make_request(client, target, &headers, &config_clone).await;
+
+                // Log the result
+                if result.status_code >= 200 && result.status_code < 300 {
+                    info!(
+                        event = "request_success",
+                        method = result.target.method,
+                        url = result.target.url.to_string(),
+                        status_code = result.status_code,
+                        latency_ms = result.latency.as_millis() as u64,
+                        bytes_in = result.bytes_in,
+                        bytes_out = result.bytes_out,
+                        message = "Request completed successfully"
+                    );
+                } else if result.status_code > 0 {
+                    warn!(
+                        event = "request_failure",
+                        method = result.target.method,
+                        url = result.target.url.to_string(),
+                        status_code = result.status_code,
+                        latency_ms = result.latency.as_millis() as u64,
+                        bytes_in = result.bytes_in,
+                        bytes_out = result.bytes_out,
+                        message = "Request failed with non-2xx status code"
+                    );
+                } else if let Some(error) = &result.error {
+                    error!(
+                        event = "request_error",
+                        method = result.target.method,
+                        url = result.target.url.to_string(),
+                        latency_ms = result.latency.as_millis() as u64,
+                        error = error,
+                        message = "Request failed with error"
+                    );
+                }
 
                 // Update metrics based on the result
                 {
@@ -460,23 +650,39 @@ pub async fn run(
     // Wait for attack to finish
     attack_handle.await?;
 
-    // If OpenTelemetry is configured, print a final message about metrics
+    // If OpenTelemetry is configured, log completion and shut down providers
     if has_opentelemetry {
-        println!("Attack completed. Flushing metrics to OpenTelemetry...");
+        println!("Attack completed. Flushing telemetry to OpenTelemetry...");
 
-        // In a full OpenTelemetry implementation, we would ensure metrics are flushed here
-        // before the application exits, to make sure all metrics are sent to the collector.
-        // For example:
-        // global::shutdown_meter_provider();
+        // Log the attack completion
+        info!(
+            event = "attack_completed",
+            message = "Load test attack completed",
+            total_requests = {
+                let metrics = metrics_for_shutdown.lock().unwrap();
+                metrics.total_requests
+            },
+            success_requests = {
+                let metrics = metrics_for_shutdown.lock().unwrap();
+                metrics.success_requests
+            },
+            failure_requests = {
+                let metrics = metrics_for_shutdown.lock().unwrap();
+                metrics.failure_requests
+            },
+        );
 
-        println!("Metrics flushed successfully.");
+        // Shut down the logger provider to flush logs
+        global::shutdown_logger_provider();
+
+        println!("Telemetry flushed successfully.");
     }
 
     Ok(())
 }
 
 /// Make a single HTTP request
-async fn make_request(
+pub async fn make_request(
     client: Arc<Client>,
     target: Target,
     headers: &[Header],

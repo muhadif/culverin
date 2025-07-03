@@ -11,6 +11,14 @@ readme = "README.md"
 keywords = ["load-testing", "http", "benchmark", "performance", "testing"]
 categories = ["command-line-utilities", "development-tools", "web-programming"]
 
+[lib]
+name = "culverin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "culverin"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream", "gzip", "brotli", "deflate", "cookies"] }
@@ -22,9 +30,13 @@ chrono = { version = "0.4", features = ["serde"] }
 indicatif = "0.17"
 anyhow = "1.0"
 thiserror = "1.0"
-opentelemetry = { version = "0.20", features = ["metrics"] }
-opentelemetry-otlp = { version = "0.13", features = ["metrics", "http-proto"] }
-opentelemetry_sdk = { version = "0.20", features = ["metrics", "rt-tokio"] }
+opentelemetry = { version = "0.20", features = ["metrics", "logs"] }
+opentelemetry-otlp = { version = "0.13", features = ["metrics", "logs", "http-proto"] }
+opentelemetry_sdk = { version = "0.20", features = ["metrics", "logs", "rt-tokio"] }
+opentelemetry-appender-tracing = "0.1"
+opentelemetry-stdout = { version = "0.1", features = ["logs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 plotters = "0.3"
 humantime = "2.1"
 num_cpus = "1.16"

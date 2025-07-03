@@ -2,7 +2,7 @@
 name = "culverin"
 version = "0.1.0"
 edition = "2024"
-description = "A HTTP load testing tool inspired"
+description = "A HTTP load testing tool"
 authors = ["Culverin Contributors"]
 license = "MIT"
 repository = "https://github.com/muhadif/culverin"

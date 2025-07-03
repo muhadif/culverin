@@ -1,6 +1,6 @@
 # Culverin
 
-Culverin is a powerful HTTP load testing tool inspired by Vegeta, written in Rust. It's designed to help you test the performance and reliability of your HTTP services under various load conditions.
+Culverin is a powerful HTTP load testing tool inspired by Vegeta (https://github.com/tsenart/vegeta), written in Rust. It's designed to help you test the performance and reliability of your HTTP services under various load conditions.
 
 ## Features
 

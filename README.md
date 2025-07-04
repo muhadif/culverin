@@ -134,7 +134,7 @@ Flags:
   --duration duration
         Duration of the test [0 = forever]
   --format string
-        Targets format [http, json] (default "http")
+        Targets format [http, json, file] (default "http")
   --h2c
         Send HTTP/2 requests without TLS encryption
   --header value
@@ -179,10 +179,14 @@ Flags:
         Targets file (default "stdin")
   --timeout duration
         Requests timeout (default 30s)
+  --http_timeout duration
+        HTTP requests timeout (default 10s)
   --unix-socket string
         Connect over a unix socket. This overrides the host address in target URLs
   --workers uint
         Initial number of workers (default 10)
+  --tolerance float
+        Tolerance for request rate (percentage as decimal, e.g., 0.1 for 10%) (default 0.1)
 ```
 
 ### Encode Command
@@ -258,16 +262,139 @@ cat results.bin | culverin plot --output=results.html --title="API Performance T
 cat results.bin | culverin encode --to=csv --output=results.csv
 ```
 
-### Using OpenTelemetry for Metrics
+### High-Performance Testing with Timeouts and Tolerance
 
-Culverin supports exporting metrics to an OpenTelemetry collector, which allows you to monitor your load tests in real-time using tools like Prometheus, Grafana, or any other system that can consume OpenTelemetry metrics.
+This example demonstrates how to use the HTTP timeout and tolerance parameters for high-performance testing:
+
+```bash
+echo "GET http://api.example.com/data" | culverin attack \
+  --rate=1000/1s \
+  --duration=30s \
+  --workers=100 \
+  --http_timeout=5s \
+  --timeout=60s \
+  --tolerance=0.2
+```
+
+This configuration:
+- Attempts to send 1000 requests per second for 30 seconds (30,000 total requests)
+- Uses 100 concurrent workers to handle the high request rate
+- Sets a 5-second timeout for individual HTTP requests
+- Sets a 60-second overall timeout for the entire attack
+- Allows a 20% tolerance in the request rate, which is useful for high-performance testing where some variation is expected
+
+### Using the File Format for Targets
+
+Culverin supports a special file format for targets that allows you to specify HTTP method, URL, headers, and body in a single file. This is useful for complex requests with different headers and bodies.
+
+```bash
+# Create a file with multiple targets using both formats
+cat > targets.txt << EOF
+# Simple format example
+POST http://api.example.com/data
+Content-Type: application/json
+Authorization: Bearer token123
+Body:
+{"key": "value", "another_key": "another_value"}
+
+# HTTP/1.1 format example
+POST /api/data/123 HTTP/1.1
+Host: api.example.com
+Content-Type: application/json
+Authorization: Bearer token123
+
+{"updated_key": "updated_value"}
+
+# Another simple format example
+GET http://api.example.com/status
+Authorization: Bearer token123
+EOF
+
+# Run the attack using the file format
+culverin attack --format=file --targets=targets.txt --duration=10s --rate=5/1s
+```
+
+The file format supports:
+
+#### Simple Format
+- HTTP method and full URL on the first line (e.g., "POST http://api.example.com/data")
+- Headers on subsequent lines (Name: Value format)
+- Body content after a "Body:" line
+- Body can be inline JSON/text or a file path (e.g., "Body: /path/to/file.json")
+- Multiple targets separated by blank lines
+
+#### HTTP/1.1 Format
+- HTTP method, path, and HTTP version on the first line (e.g., "POST /api/data HTTP/1.1")
+- Headers on subsequent lines, including a required "Host:" header
+- Body content after an empty line
+- Multiple targets separated by blank lines
+
+Both formats can be mixed in the same file.
+
+## Request Rate Handling and Timeouts
+
+Culverin is designed to accurately maintain the specified request rate while ensuring all requests are completed:
+
+### Request Rate and Duration
+
+- When you specify a rate (e.g., `--rate=100/1s`) and duration (e.g., `--duration=10s`), Culverin will attempt to send exactly that number of requests (e.g., 1000 requests total).
+- The tool will wait for all requests to complete, even if it takes longer than the specified duration.
+- If the actual number of completed requests is less than the expected number (rate * duration), Culverin will return an error.
+
+### Timeouts
+
+Culverin has two separate timeout parameters:
+- `--timeout`: General timeout for the entire attack operation (default 30s)
+- `--http_timeout`: Specific timeout for individual HTTP requests (default 10s)
+
+The HTTP timeout ensures that individual requests don't hang indefinitely, while still allowing the overall attack to continue until all requests are completed or the general timeout is reached.
+
+### Worker Management
+
+- The `--workers` parameter controls the number of concurrent workers (default 10)
+- Workers are spawned at the specified rate, regardless of whether previous workers have completed
+- This ensures that the actual request rate matches the specified rate, even if some requests take longer to complete
+
+### Tolerance
+
+The `--tolerance` parameter (default 0.1 or 10%) allows for some flexibility in the request rate. This is useful when:
+- The system under test is experiencing high latency
+- Network conditions are variable
+- You want to ensure a minimum number of requests are completed
+
+## Terminal Output and Logging
+
+By default, Culverin only displays progress information and a summary of results in the terminal. Detailed response information is not printed to the terminal to avoid cluttering the output.
+
+The summary includes:
+- Total requests
+- Successful requests
+- Failed requests
+- Success rate
+- Average latency
+- Data transferred (received and sent)
+
+If you want to save detailed response information, use the `--output` flag to specify a file:
 
 ```bash
 echo "GET http://example.com/" | culverin attack \
   --duration=30s \
   --rate=50/1s \
-  --opentelemetry-addr="http://localhost:4318/v1/metrics"
+  --output=results.bin
 ```
+
+### Using OpenTelemetry for Metrics and Logs
+
+Culverin supports exporting metrics and logs to an OpenTelemetry collector, which allows you to monitor your load tests in real-time using tools like Prometheus, Grafana, or any other system that can consume OpenTelemetry data.
+
+```bash
+echo "GET http://example.com/" | culverin attack \
+  --duration=30s \
+  --rate=50/1s \
+  --opentelemetry-addr="http://localhost:4318"
+```
+
+When an OpenTelemetry address is provided, detailed logs and metrics are sent to the collector. This is useful for monitoring and debugging load tests without cluttering the terminal output.
 
 The following metrics are exported:
 - `requests`: Total number of requests
@@ -311,9 +438,11 @@ async fn main() -> Result<()> {
 
     // Configure and run the attack
     let results = AttackBuilder::new()
-        .rate(10.0)  // 10 requests per second
+        .rate(10.0)                        // 10 requests per second
         .duration(Duration::from_secs(5))  // Run for 5 seconds
-        .timeout(Duration::from_secs(3))   // 3 second timeout
+        .timeout(Duration::from_secs(30))  // 30 second general timeout
+        .http_timeout(Duration::from_secs(10))  // 10 second HTTP timeout
+        .tolerance(0.1)                    // 10% tolerance for request rate
         .workers(4)                        // Use 4 worker threads
         .add_header("User-Agent", "culverin-example")
         .add_target(target)
@@ -361,7 +490,9 @@ The `AttackBuilder` provides a fluent API for configuring load tests. Here are s
 
 - `rate(f64)`: Set the request rate (requests per second)
 - `duration(Duration)`: Set the attack duration
-- `timeout(Duration)`: Set the request timeout
+- `timeout(Duration)`: Set the general request timeout
+- `http_timeout(Duration)`: Set the HTTP request timeout
+- `tolerance(f64)`: Set the tolerance for request rate (percentage as decimal, e.g., 0.1 for 10%)
 - `workers(u64)`: Set the number of workers
 - `max_workers(u64)`: Set the maximum number of workers
 - `keepalive(bool)`: Set whether to keep connections alive

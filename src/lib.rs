@@ -79,6 +79,7 @@ pub struct AttackBuilder {
     insecure: bool,
     h2c: bool,
     redirects: i32,
+    http_timeout: Duration,
 }
 
 impl Default for AttackBuilder {
@@ -104,6 +105,7 @@ impl Default for AttackBuilder {
             insecure: false,
             h2c: false,
             redirects: 10,
+            http_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -291,6 +293,8 @@ impl AttackBuilder {
             laddr: self.laddr,
             lazy: self.lazy,
             opentelemetry_addr: self.opentelemetry_addr,
+            tolerance: Some(0.1),
+            http_timeout: self.http_timeout
         };
 
         // Create HTTP client
@@ -426,7 +430,6 @@ impl AttackBuilder {
         };
 
         // Collect results
-        let mut results = Vec::new();
 
         // Create a separate task to collect results
         let collector_handle = tokio::spawn(async move {
@@ -444,7 +447,7 @@ impl AttackBuilder {
         drop(tx);
 
         // Wait for collector to finish and get results
-        results = collector_handle.await?;
+        let results = collector_handle.await?;
 
         Ok(results)
     }
@@ -480,6 +483,7 @@ pub fn calculate_metrics(results: &[AttackResult]) -> Option<Metrics> {
 
     let requests = results.len();
     let success = results.iter().filter(|r| r.status_code >= 200 && r.status_code < 300).count();
+    let timeouts = results.iter().filter(|r| r.timed_out).count();
     let success_rate = success as f64 / requests as f64;
 
     // Calculate duration from first to last request
@@ -521,6 +525,7 @@ pub fn calculate_metrics(results: &[AttackResult]) -> Option<Metrics> {
     Some(Metrics {
         requests,
         success,
+        timeouts,
         duration,
         min,
         max,

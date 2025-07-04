@@ -1,6 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::{Result};
 use clap::{Parser, Subcommand};
-use std::time::Duration;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -13,10 +12,6 @@ struct Cli {
     /// Enable profiling of [cpu, heap]
     #[arg(long, global = true)]
     profile: Option<String>,
-
-    /// Print version and exit
-    #[arg(long, global = true)]
-    version: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -54,7 +49,7 @@ enum Commands {
         #[arg(long)]
         duration: Option<humantime::Duration>,
 
-        /// Targets format [http, json]
+        /// Targets format [http, json, file]
         #[arg(long, default_value = "http")]
         format: String,
 
@@ -146,6 +141,10 @@ enum Commands {
         #[arg(long, default_value = "30s")]
         timeout: humantime::Duration,
 
+        /// HTTP requests timeout
+        #[arg(long, default_value = "10s")]
+        http_timeout: humantime::Duration,
+
         /// Connect over a unix socket. This overrides the host address in target URLs
         #[arg(long)]
         unix_socket: Option<String>,
@@ -153,6 +152,10 @@ enum Commands {
         /// Initial number of workers
         #[arg(long, default_value = "10")]
         workers: u64,
+
+        /// Tolerance for request rate (percentage as decimal, e.g., 0.1 for 10%)
+        #[arg(long, default_value = "0.1")]
+        tolerance: f64,
     },
 
     /// Encode attack results to different formats
@@ -213,7 +216,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Set number of CPUs to use
-    let cpu_count = if let Some(cpus) = cli.cpus {
+    let _cpu_count = if let Some(cpus) = cli.cpus {
         println!("Using {} CPUs", cpus);
         cpus
     } else {
@@ -270,11 +273,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Handle version flag
-    if cli.version {
-        println!("Culverin version {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
+    // Version flag is handled automatically by clap
 
     match cli.command {
         Some(Commands::Attack {
@@ -310,20 +309,36 @@ async fn main() -> Result<()> {
             timeout,
             unix_socket,
             workers,
+            tolerance,
+            http_timeout
         }) => {
-            // Use the CPU count to set the number of workers if not explicitly specified
+            // Use the rate value directly to determine the number of workers
+            // We don't need to estimate based on latency since we'll spawn requests at the exact rate
             let effective_workers = if workers == 10 { // Default value is 10
-                cpu_count as u64
+                // Parse the rate to get the requests per second
+                let rate_str = rate.clone();
+                let rate_value = match crate::utils::parse_rate(&rate_str) {
+                    Ok(value) => value,
+                    Err(_) => 50.0, // Default to 50 req/s if parsing fails
+                };
+
+                // Use the rate value as the number of workers
+                // This ensures we have enough workers to handle the desired request rate
+                // without waiting for responses
+                rate_value.ceil() as u64
             } else {
                 workers
             };
+
+            println!("Using {} workers for rate {}", effective_workers, rate);
 
             attack::run(
                 body, cert, chunked, connections, dns_ttl, duration, format, h2c, 
                 headers, http2, insecure, keepalive, key, laddr, lazy, max_body, 
                 max_connections, max_workers, name, output, opentelemetry_addr, 
                 proxy_headers, rate, redirects, resolvers, root_certs, 
-                session_tickets, targets, timeout, unix_socket, effective_workers
+                session_tickets, targets, timeout, http_timeout, unix_socket, effective_workers,
+                tolerance
             ).await?;
         }
         Some(Commands::Encode { output, to }) => {

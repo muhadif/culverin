@@ -9,7 +9,7 @@ use opentelemetry_sdk::logs::LoggerProvider;
 use opentelemetry_sdk::metrics::MeterProviderBuilder;
 use opentelemetry_sdk::Resource;
 use reqwest::Client;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -23,6 +23,7 @@ struct AttackMetrics {
     total_requests: u64,
     success_requests: u64,
     failure_requests: u64,
+    timeout_requests: u64,
     bytes_in: u64,
     bytes_out: u64,
     active_workers: i64,
@@ -35,11 +36,16 @@ impl AttackMetrics {
             total_requests: 0,
             success_requests: 0,
             failure_requests: 0,
+            timeout_requests: 0,
             bytes_in: 0,
             bytes_out: 0,
             active_workers: 0,
             request_durations: Vec::new(),
         }
+    }
+
+    fn increment_timeout(&mut self) {
+        self.timeout_requests += 1;
     }
 
     fn increment_requests(&mut self) {
@@ -76,7 +82,7 @@ impl AttackMetrics {
 }
 
 use crate::models::{AttackConfig, Header, Result as AttackResult, Target};
-use crate::utils::{get_reader, parse_headers, parse_http_targets, parse_json_targets, parse_rate};
+use crate::utils::{get_reader, parse_headers, parse_http_targets, parse_json_targets, parse_rate, parse_file_targets};
 
 /// Run the attack command with the given arguments
 pub async fn run(
@@ -104,13 +110,15 @@ pub async fn run(
     proxy_headers: Vec<String>,
     rate: String,
     redirects: i32,
-    resolvers: Vec<String>,
+    _resolvers: Vec<String>,
     root_certs: Vec<String>,
-    session_tickets: bool,
+    _session_tickets: bool,
     targets: String,
     timeout: humantime::Duration,
-    unix_socket: Option<String>,
+    http_timeout: humantime::Duration,
+    _unix_socket: Option<String>,
     workers: u64,
+    tolerance: f64,
 ) -> Result<()> {
     // Parse rate
     let rate_value = parse_rate(&rate)?;
@@ -120,6 +128,7 @@ pub async fn run(
         rate: rate_value,
         duration: duration.map(|d| d.into()),
         timeout: timeout.into(),
+        http_timeout: http_timeout.into(),
         workers,
         max_workers,
         keepalive,
@@ -132,6 +141,7 @@ pub async fn run(
         laddr: laddr.clone(),
         lazy,
         opentelemetry_addr: opentelemetry_addr.clone(),
+        tolerance: Some(tolerance),
     };
 
     // Parse headers
@@ -156,6 +166,7 @@ pub async fn run(
     let targets_list = match format.as_str() {
         "http" => parse_http_targets(reader)?,
         "json" => parse_json_targets(reader)?,
+        "file" => parse_file_targets(reader)?,
         _ => anyhow::bail!("Unsupported format: {}", format),
     };
 
@@ -165,7 +176,7 @@ pub async fn run(
 
     // Create HTTP client
     let mut client_builder = Client::builder()
-        .timeout(config.timeout)
+        .timeout(config.http_timeout)
         .pool_max_idle_per_host(config.connections);
 
     if let Some(max_conns) = config.max_connections {
@@ -229,15 +240,19 @@ pub async fn run(
 
     let client = Arc::new(client_builder.build()?);
 
-    // Set up progress bar
+    // Set up a single progress bar for all progress information
     let progress_style = ProgressStyle::default_bar()
         .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
         .unwrap()
         .progress_chars("##-");
 
+    // Create a single progress bar that shows both time and request progress
     let progress_bar = if duration.is_some() {
-        let pb = ProgressBar::new(duration.unwrap().as_secs() as u64);
+        let expected_requests = (rate_value * duration.unwrap().as_secs_f64()) as u64;
+        let pb = ProgressBar::new(expected_requests);
         pb.set_style(progress_style);
+        pb.set_message("Running test (0 active requests)");
+        pb.enable_steady_tick(Duration::from_millis(100));
         Some(pb)
     } else {
         None
@@ -258,7 +273,7 @@ pub async fn run(
         println!("Setting up OpenTelemetry endpoint at: {}", addr);
 
         // Initialize the OpenTelemetry OTLP exporter for metrics
-        let metrics_exporter = opentelemetry_otlp::new_exporter()
+        let _metrics_exporter = opentelemetry_otlp::new_exporter()
             .http()
             .with_endpoint(format!("{}/v1/metrics", addr.clone()));
 
@@ -331,18 +346,10 @@ pub async fn run(
         let otel_layer = layer::OpenTelemetryTracingBridge::new(&logger_provider)
             .with_filter(filter_otel);
 
-        // Create a standard formatting layer with its own filter
-        let filter_fmt = EnvFilter::new("info")
-            .add_directive("opentelemetry=debug".parse().unwrap());
-
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_thread_names(true)
-            .with_filter(filter_fmt);
-
-        // Initialize the tracing subscriber with both layers
+        // Initialize the tracing subscriber with only the OpenTelemetry layer
+        // This ensures logs are only sent to OpenTelemetry, not to the terminal
         tracing_subscriber::registry()
             .with(otel_layer)
-            .with(fmt_layer)
             .init();
 
         info!(
@@ -460,6 +467,9 @@ pub async fn run(
         // Set up end time if duration is specified
         let end_time = config.duration.map(|d| start_time + d);
 
+        // Calculate expected number of requests if duration is specified
+        let expected_requests = config.duration.map(|d| (config.rate * d.as_secs_f64()) as usize);
+
         // Create a stream of targets with the specified rate
         let mut interval = tokio::time::interval(delay);
 
@@ -473,7 +483,7 @@ pub async fn run(
                 let duration_clone = config.duration.clone();
                 let workers = config.workers;  // Store the workers value before moving
                 tokio::spawn(async move {
-                    let start = Instant::now();
+                    let _start = Instant::now();
                     let worker_diff = max_workers - workers;
                     let total_duration = duration_clone.unwrap_or(Duration::from_secs(60));
                     let interval = total_duration.div_f64(worker_diff as f64);
@@ -489,16 +499,36 @@ pub async fn run(
         loop {
             interval.tick().await;
 
-            // Check if we've reached the end time
-            if let Some(end) = end_time {
+            // Check if we've sent all expected requests
+            if let Some(expected) = expected_requests {
+                // Only break if we've sent all expected requests
+                // This ensures we wait for all requests to complete, even if it takes longer than the specified duration
+                if request_count >= expected {
+                    break;
+                }
+            } else if let Some(end) = end_time {
+                // If we don't have expected_requests, just check end time
+                // This is a fallback for cases where expected_requests is not set
                 if Instant::now() >= end {
                     break;
                 }
             }
 
-            // Update progress bar
+            // Update progress bar with request count and active workers
             if let Some(pb) = &progress_bar {
-                pb.set_position(Instant::now().duration_since(start_time).as_secs());
+                // Get active workers count
+                let active_workers = {
+                    let metrics = metrics.lock().unwrap();
+                    metrics.active_workers
+                };
+
+                // Update progress bar position with request count
+                pb.set_position(request_count as u64);
+
+                // Update message with elapsed time and active workers
+                let elapsed = Instant::now().duration_since(start_time).as_secs();
+                pb.set_message(format!("Running test [{} sec] ({} active requests)", 
+                                      elapsed, active_workers));
             }
 
             // Get the next target (round-robin)
@@ -532,14 +562,13 @@ pub async fn run(
 
             // Acquire a permit from the semaphore before spawning the task
             // This ensures we don't exceed the worker limit
-            let permit = match semaphore.clone().try_acquire_owned() {
+            // Wait for a permit to become available instead of skipping the request
+            // This ensures all requests are processed, even if it takes longer than the specified duration
+            let permit = match semaphore.clone().acquire_owned().await {
                 Ok(permit) => permit,
                 Err(_) => {
-                    // If we can't acquire a permit, wait for one to become available
-                    match semaphore.clone().acquire_owned().await {
-                        Ok(permit) => permit,
-                        Err(_) => continue, // If semaphore is closed, skip this request
-                    }
+                    // If the semaphore is closed, skip this request
+                    continue;
                 }
             };
 
@@ -608,8 +637,10 @@ pub async fn run(
                     // Record the request duration
                     metrics.record_duration(result.latency.as_secs_f64());
 
-                    // Increment success or failure counter based on status code
-                    if result.status_code >= 200 && result.status_code < 300 {
+                    // Increment success, failure, or timeout counter based on result
+                    if result.timed_out {
+                        metrics.increment_timeout();
+                    } else if result.status_code >= 200 && result.status_code < 300 {
                         metrics.increment_success();
                     } else {
                         metrics.increment_failure();
@@ -628,31 +659,131 @@ pub async fn run(
                 drop(permit);
             });
 
+            // Increment request count after successfully spawning the task
             request_count += 1;
+        }
+
+        // Check if the total number of requests matches the expected rate * duration
+        if let Some(duration) = config.duration {
+            let elapsed = Instant::now().duration_since(start_time);
+            let expected_requests = (config.rate * duration.as_secs_f64()) as usize;
+
+            // Log the actual vs expected requests
+            println!("Completed {} requests out of {} expected ({:.2}%)", 
+                     request_count, 
+                     expected_requests, 
+                     (request_count as f64 / expected_requests as f64) * 100.0);
+
+            // If we haven't completed the expected number of requests, return an error
+            if request_count < expected_requests {
+                return Err(anyhow::anyhow!(
+                    "Failed to achieve target rate: completed {} requests in {:?}, expected {} requests in {:?}",
+                    request_count,
+                    elapsed,
+                    expected_requests,
+                    duration
+                ));
+            }
+        }
+
+        // Update progress bar to waiting mode
+        if let Some(pb) = &progress_bar {
+            pb.set_message("Waiting for remaining requests to complete...");
+        }
+
+        // Wait for all active requests to complete or timeout
+        let timeout_duration = config.timeout.max(config.http_timeout);
+        let wait_start = Instant::now();
+
+        loop {
+            // Check if all workers are done
+            let active_workers = {
+                let metrics = metrics.lock().unwrap();
+                metrics.active_workers
+            };
+
+            if active_workers <= 0 {
+                break;
+            }
+
+            // Check if we've waited too long
+            let elapsed = Instant::now().duration_since(wait_start);
+            if elapsed > timeout_duration {
+                println!("Timeout waiting for requests to complete. Some requests may still be in progress.");
+                break;
+            }
+
+            // Update progress bar message with count of remaining requests
+            if let Some(pb) = &progress_bar {
+                pb.set_message(format!("Waiting for {} remaining requests...", active_workers));
+            }
+
+            // Sleep a bit before checking again
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         // Finish progress bar
         if let Some(pb) = progress_bar {
-            pb.finish_with_message("Attack completed");
+            pb.finish_with_message("All requests completed");
         }
+
+        Ok(())
     });
 
     // Process results
-    let mut writer = crate::utils::get_writer(&output)?;
+    // Only write detailed results to a file, not to stdout
+    if output != "stdout" {
+        let mut writer = crate::utils::get_writer(&output)?;
 
-    while let Some(result) = rx.recv().await {
-        // In a real implementation, we would write the result to the output
-        // For now, we'll just serialize it to JSON and write it
-        let json = serde_json::to_string(&result)?;
-        writeln!(writer, "{}", json)?;
+        while let Some(result) = rx.recv().await {
+            // Serialize the result to JSON and write it to the file
+            let json = serde_json::to_string(&result)?;
+            writeln!(writer, "{}", json)?;
+        }
+    } else {
+        // If output is stdout, just consume the results without printing details
+        while let Some(_) = rx.recv().await {
+            // Do nothing with the result, just consume it
+        }
     }
 
     // Wait for attack to finish
     attack_handle.await?;
 
+    // Display a summary of the attack results in the terminal
+    {
+        let metrics = metrics_for_shutdown.lock().unwrap();
+        println!("\nAttack Summary:");
+        println!("  Total Requests: {}", metrics.total_requests);
+        println!("  Successful Requests: {}", metrics.success_requests);
+        println!("  Failed Requests: {}", metrics.failure_requests);
+
+        // Display timed out requests
+        println!("  Timed Out Requests: {}", metrics.timeout_requests);
+
+        // Calculate success rate
+        let success_rate = if metrics.total_requests > 0 {
+            (metrics.success_requests as f64 / metrics.total_requests as f64) * 100.0
+        } else {
+            0.0
+        };
+        println!("  Success Rate: {:.2}%", success_rate);
+
+        // Calculate average latency if there are any requests
+        if !metrics.request_durations.is_empty() {
+            let avg_latency = metrics.request_durations.iter().sum::<f64>() / metrics.request_durations.len() as f64;
+            println!("  Average Latency: {:.2}ms", avg_latency * 1000.0);
+        }
+
+        // Display data transfer information
+        println!("  Data Transferred:");
+        println!("    Received: {}", crate::utils::format_size(metrics.bytes_in as usize));
+        println!("    Sent: {}", crate::utils::format_size(metrics.bytes_out as usize));
+    }
+
     // If OpenTelemetry is configured, log completion and shut down providers
     if has_opentelemetry {
-        println!("Attack completed. Flushing telemetry to OpenTelemetry...");
+        println!("\nFlushing telemetry to OpenTelemetry...");
 
         // Log the attack completion
         info!(
@@ -720,51 +851,92 @@ pub async fn make_request(
     // Make the request
     let bytes_out = target.body.as_ref().map(|b| b.len()).unwrap_or(0);
 
-    let result = match request_builder.send().await {
-        Ok(response) => {
-            let status_code = response.status().as_u16();
+    // Create a timeout future that will complete after http_timeout
+    let timeout_duration = config.http_timeout;
+    let request_future = request_builder.send();
 
-            // Read the response body
-            let body_bytes = match response.bytes().await {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    return AttackResult {
-                        timestamp,
-                        latency: start_time.elapsed(),
-                        status_code,
-                        error: Some(format!("Failed to read response body: {}", e)),
-                        target,
-                        bytes_in: 0,
-                        bytes_out,
-                    };
+    // Use tokio::time::timeout to enforce the HTTP timeout
+    let result = match tokio::time::timeout(timeout_duration, request_future).await {
+        // Request completed within timeout
+        Ok(request_result) => match request_result {
+            Ok(response) => {
+                let status_code = response.status().as_u16();
+
+                // Read the response body with timeout
+                let body_future = response.bytes();
+                let body_bytes = match tokio::time::timeout(timeout_duration, body_future).await {
+                    Ok(body_result) => match body_result {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            return AttackResult {
+                                timestamp,
+                                latency: start_time.elapsed(),
+                                status_code,
+                                error: Some(format!("Failed to read response body: {}", e)),
+                                target,
+                                bytes_in: 0,
+                                bytes_out,
+                                timed_out: false,
+                            };
+                        }
+                    },
+                    Err(_) => {
+                        // Body read timed out
+                        return AttackResult {
+                            timestamp,
+                            latency: start_time.elapsed(),
+                            status_code,
+                            error: Some(format!("Response body read timed out after {:?}", timeout_duration)),
+                            target,
+                            bytes_in: 0,
+                            bytes_out,
+                            timed_out: true,
+                        };
+                    }
+                };
+
+                // Limit the body size if max_body is set
+                let bytes_in = if config.max_body >= 0 && (body_bytes.len() as i64) > config.max_body {
+                    config.max_body as usize
+                } else {
+                    body_bytes.len()
+                };
+
+                AttackResult {
+                    timestamp,
+                    latency: start_time.elapsed(),
+                    status_code,
+                    error: None,
+                    target,
+                    bytes_in,
+                    bytes_out,
+                    timed_out: false,
                 }
-            };
-
-            // Limit the body size if max_body is set
-            let bytes_in = if config.max_body >= 0 && (body_bytes.len() as i64) > config.max_body {
-                config.max_body as usize
-            } else {
-                body_bytes.len()
-            };
-
-            AttackResult {
-                timestamp,
-                latency: start_time.elapsed(),
-                status_code,
-                error: None,
-                target,
-                bytes_in,
-                bytes_out,
             }
-        }
-        Err(e) => AttackResult {
+            Err(e) => {
+                let is_timeout = e.is_timeout();
+                AttackResult {
+                    timestamp,
+                    latency: start_time.elapsed(),
+                    status_code: 0,
+                    error: Some(format!("Request failed: {}", e)),
+                    target,
+                    bytes_in: 0,
+                    bytes_out,
+                    timed_out: is_timeout,
+                }
+            }
+        },
+        // Request timed out
+        Err(_) => AttackResult {
             timestamp,
             latency: start_time.elapsed(),
             status_code: 0,
-            error: Some(format!("Request failed: {}", e)),
+            error: Some(format!("Request timed out after {:?}", timeout_duration)),
             target,
             bytes_in: 0,
             bytes_out,
+            timed_out: true,
         },
     };
 

@@ -41,6 +41,8 @@ pub struct Result {
     pub bytes_in: usize,
     /// Size of the request body in bytes
     pub bytes_out: usize,
+    /// Whether the request timed out
+    pub timed_out: bool,
 }
 
 /// Represents metrics from a load test
@@ -50,6 +52,8 @@ pub struct Metrics {
     pub requests: usize,
     /// Number of successful requests (2xx status)
     pub success: usize,
+    /// Number of timed out requests
+    pub timeouts: usize,
     /// Total duration of the test
     pub duration: Duration,
     /// Minimum latency observed
@@ -85,6 +89,8 @@ pub struct AttackConfig {
     pub duration: Option<Duration>,
     /// Timeout for each request
     pub timeout: Duration,
+    /// HTTP timeout for each request
+    pub http_timeout: Duration,
     /// Number of workers
     pub workers: u64,
     /// Maximum number of workers
@@ -109,4 +115,6 @@ pub struct AttackConfig {
     pub lazy: bool,
     /// OpenTelemetry exporter listen address
     pub opentelemetry_addr: Option<String>,
+    /// Tolerance for request rate (percentage as decimal, e.g., 0.1 for 10%)
+    pub tolerance: Option<f64>,
 }

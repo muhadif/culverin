@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::io::{BufRead, Write};
-use std::time::Duration;
+// use std::time::Duration;
 
 use crate::models::Result as AttackResult;
 use crate::utils::{get_reader, get_writer};

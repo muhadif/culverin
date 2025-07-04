@@ -1,5 +1,5 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+// use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ pub async fn run(
     let mut writer = get_writer(&output)?;
 
     // Parse buckets if provided
-    let buckets = match buckets {
+    let _buckets = match buckets {
         Some(b) => parse_buckets(&b)?,
         None => vec![],
     };
@@ -253,6 +253,7 @@ fn calculate_metrics(results: &[AttackResult]) -> Metrics {
         return Metrics {
             requests: 0,
             success: 0,
+            timeouts: 0,
             duration: Duration::from_secs(0),
             min: Duration::from_secs(0),
             max: Duration::from_secs(0),
@@ -319,6 +320,7 @@ fn calculate_metrics(results: &[AttackResult]) -> Metrics {
     Metrics {
         requests,
         success,
+        timeouts: results.iter().filter(|r| r.timed_out).count(),
         duration,
         min,
         max,
